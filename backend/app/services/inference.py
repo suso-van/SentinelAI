@@ -9,10 +9,8 @@ from pymediainfo import MediaInfo
 from PIL import Image, ExifTags
 from app.core.config import settings
 
-# Load model at startup
 model = load_model(settings.MODEL_PATH)
 
-# --- METADATA HEURISTICS ---
 SUSPICIOUS_VIDEO_ENCODERS = [
   "lavf", "ffmpeg", "after effects", "premiere",
   "davinci", "blender", "obs", "handbrake"
@@ -35,14 +33,12 @@ def analyze_video_metadata_risk(metadata: dict) -> dict:
   general_info = metadata.get("general", {})
   encoded_app = str(general_info.get("encoded_application", "")).lower()
 
-  # 1. Check for known editing or FFmpeg libraries
   for suspect in SUSPICIOUS_VIDEO_ENCODERS:
     if suspect in encoded_app:
       flags.append(f"Video was processed using {suspect.title()} (Found: {general_info.get('encoded_application')})")
       risk_level = "High"
       break
 
-  # 2. Check for stripped metadata
   if not encoded_app and not metadata.get("video", {}).get("codec"):
     flags.append("Metadata is heavily stripped or missing standard container tags.")
     if risk_level != "High":
@@ -61,14 +57,12 @@ def analyze_image_metadata_risk(metadata: dict) -> dict:
 
   software = str(metadata.get("exif", {}).get("Software", "")).lower()
 
-  # 1. Check for generative AI or heavy editing software
   for suspect in SUSPICIOUS_IMAGE_SOFTWARE:
     if suspect in software:
       flags.append(f"Image was processed using {suspect.title()} (Found: {metadata['exif']['Software']})")
       risk_level = "High"
       break
 
-  # 2. Check for stripped metadata
   if not metadata.get("exif"):
     flags.append(
       "EXIF metadata is completely stripped, which can indicate intentional obfuscation or social media compression.")
@@ -119,7 +113,6 @@ def extract_image_metadata(image_path: str) -> dict:
     if exif_data:
       for tag_id, value in exif_data.items():
         tag_name = ExifTags.TAGS.get(tag_id, tag_id)
-        # Skip raw byte arrays (like thumbnail data) which cannot be serialized
         if isinstance(value, bytes):
           continue
         metadata["exif"][tag_name] = str(value)
@@ -165,11 +158,9 @@ def preprocess_to_match_training(img: np.ndarray) -> np.ndarray:
 
 
 def analyze_video_for_deepfakes(video_path: str, target_fps: int = 2, threshold: float = 0.85):
-  # 1. Extract and analyze metadata
   raw_metadata = extract_video_metadata(video_path)
   metadata_risk = analyze_video_metadata_risk(raw_metadata)
 
-  # 2. Proceed with visual analysis
   cap = cv2.VideoCapture(video_path)
   actual_fps = cap.get(cv2.CAP_PROP_FPS) or 30
 
@@ -221,7 +212,6 @@ def analyze_video_for_deepfakes(video_path: str, target_fps: int = 2, threshold:
 
   visual_verdict, visual_confidence = get_verdict_and_confidence(agg_score, custom_threshold=threshold)
 
-  # 4. Final System Assessment
   system_warning = None
   if visual_verdict == "Real" and visual_confidence < 75.0 and metadata_risk["risk_level"] == "High":
     system_warning = "Visuals appear real, but high-risk metadata suggests the file was heavily edited or generated."
@@ -243,7 +233,7 @@ def analyze_video_for_deepfakes(video_path: str, target_fps: int = 2, threshold:
     "system_warning": system_warning
   }
 
-def extract_image_metadata(image_bytes: bytes) -> dict:
+def extract_image_metadata_from_bytes(image_bytes: bytes) -> dict:
   """Extracts EXIF and basic file metadata from raw image bytes in memory."""
   try:
     img = Image.open(io.BytesIO(image_bytes))
@@ -258,7 +248,6 @@ def extract_image_metadata(image_bytes: bytes) -> dict:
     if exif_data:
       for tag_id, value in exif_data.items():
         tag_name = ExifTags.TAGS.get(tag_id, tag_id)
-        # Skip raw byte arrays (like thumbnail data) which cannot be serialized
         if isinstance(value, bytes):
           continue
         metadata["exif"][tag_name] = str(value)
@@ -269,36 +258,28 @@ def extract_image_metadata(image_bytes: bytes) -> dict:
 
 
 def analyze_image_for_deepfakes(image_bytes: bytes, threshold: float = 0.85):
-  # 1. Extract and analyze Image EXIF Metadata from bytes
-  raw_metadata = extract_image_metadata(image_bytes)
+  raw_metadata = extract_image_metadata_from_bytes(image_bytes)
   metadata_risk = analyze_image_metadata_risk(raw_metadata)
 
-  # 2. Visual analysis (Use Pillow instead of OpenCV to decode, as it is more robust)
   try:
-    # Load with Pillow directly from memory
     pil_img = Image.open(io.BytesIO(image_bytes))
 
-    # Ensure image is in RGB format (handles RGBA, Grayscale, CMYK, etc.)
     if pil_img.mode != "RGB":
       pil_img = pil_img.convert("RGB")
 
-    # Convert directly to NumPy array (Pillow natively uses RGB)
     rgb_img = np.array(pil_img)
 
   except Exception as e:
     raise ValueError(
       f"Could not decode image. The file might be corrupted or in an unsupported format. Error: {str(e)}")
 
-  # 3. Preprocess and Predict
   processed = preprocess_to_match_training(rgb_img)
   processed = np.expand_dims(processed, axis=0)
 
   score = float(model.predict(processed, verbose=0)[0][0])
 
-  # 4. Apply High Threshold logic
   visual_verdict, visual_confidence = get_verdict_and_confidence(score, custom_threshold=threshold)
 
-  # 5. Final System Assessment
   system_warning = None
   if visual_verdict == "Real" and visual_confidence < 75.0 and metadata_risk["risk_level"] == "High":
     system_warning = "Visuals appear real, but high-risk metadata suggests the image was edited or AI-generated."
