@@ -1,3 +1,6 @@
+# backend/app/api/routes.py
+
+import httpx
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import shutil
@@ -6,10 +9,11 @@ import os
 import asyncio
 import yt_dlp
 
-from app.models.schemas import URLRequest
+from app.models.schemas import URLRequest, VerifyNewsRequest, VerifyNewsResponse
 from app.services.downloader import download_video_with_ytdlp
 from app.services.inference import analyze_video_for_deepfakes, analyze_image_for_deepfakes
 from app.services.gemini_service import analyze_with_gemini
+from app.services.news_detect import retrieve_evidence, verify_claim_against_evidence
 
 router = APIRouter()
 
@@ -65,17 +69,14 @@ async def analyze_image(file: UploadFile = File(...)):
     raise HTTPException(status_code=400, detail="Invalid file type. Please upload an image.")
 
   try:
-    # 1. Prepare the raw bytes
     await file.seek(0)
     contents = await file.read()
 
     if not contents:
       raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
-    # 2. STAGE 1: Fast Local Visual & Metadata Scan (from inference.py)
     local_result = await asyncio.to_thread(analyze_image_for_deepfakes, contents)
 
-    # 3. Determine if Stage 2 is needed
     verdict = local_result["visual_analysis"]["verdict"]
     confidence = local_result["visual_analysis"]["confidence"]
     risk = local_result["metadata_analysis"]["risk_level"]
@@ -90,7 +91,6 @@ async def analyze_image(file: UploadFile = File(...)):
       local_result["gemini_analysis"] = "Bypassed. Image passed local security thresholds."
       return JSONResponse(content=local_result)
 
-    # 4. STAGE 2: Deep Contextual Analysis (from gemini_service.py)
     gemini_text = await asyncio.to_thread(analyze_with_gemini, contents, local_result)
     local_result["gemini_analysis"] = gemini_text
 
@@ -100,3 +100,23 @@ async def analyze_image(file: UploadFile = File(...)):
     raise HTTPException(status_code=400, detail=str(ve))
   except Exception as e:
     raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+
+@router.post("/verify_news", response_model=VerifyNewsResponse)
+async def verify_news(request: VerifyNewsRequest):
+    try:
+        claim = request.headline.strip()
+        evidence = await retrieve_evidence(claim)
+        verification = await verify_claim_against_evidence(claim, evidence)
+
+        return VerifyNewsResponse(
+            claim=claim,
+            verdict=verification["verdict"],
+            confidence=verification["confidence"],
+            evidence=evidence if evidence else ["No trusted evidence found from live news sources."],
+            reasoning=verification["reasoning"]
+        )
+
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"News retrieval failed: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Verification failed: {str(e)}")
